@@ -1,3 +1,5 @@
-# Variational Open-Domain
+# Variational Open-Domain (VOD)
 
-> Bound and gradient computation.
+Core methods (priority sampling, gradients) for Variational Open-Domain QA/LM.
+
+> **Warning**: refactoring in progress, coming soon!
