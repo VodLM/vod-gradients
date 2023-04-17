@@ -177,8 +177,8 @@ def run():
             if j == 0:
                 axes[3, i].plot(
                     sample_range,
-                    np.power(sample_range, -0.5),
-                    label=r"$K^{-1/2}$",
+                    np.power(sample_range, -1.0),
+                    label=r"$K^{-1}$",
                     color="gray",
                     linestyle="--",
                     alpha=0.5,
