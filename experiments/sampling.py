@@ -1,4 +1,5 @@
 import argparse
+import dataclasses
 
 import numpy as np
 import rich
@@ -10,12 +11,13 @@ import seaborn as sns
 import vod
 
 sns.set()
+colors = sns.color_palette()
 
 
 class Args(pydantic.BaseModel):
     n_trials: int = 5_000
     n_samples_min: int = 1
-    n_samples_max: int = 95
+    n_samples_max: int = 100
     n_samples_step: int = 10
     world_size: int = 100
     noise_scale_min: float = 1e-1
@@ -57,24 +59,31 @@ def generate_scores(
     return log_p
 
 
+@dataclasses.dataclass
+class SamplerInfo:
+    name: str
+    fn: vod.SampleFn
+    color: str
+
+
 @torch.no_grad()
 def run():
     args = Args.parse()
     rich.print(args)
 
     axis = generate_axis(args.world_size, args.a, args.b)
-    samplers = {
-        "monte-carlo": vod.mc_sample,
-        "priority": vod.priority_sample,
-        "sn-priority": vod.priority_sample,
-    }
+    samplers = [
+        SamplerInfo("multinomial", vod.multinomial_sample, color=colors[0]),
+        SamplerInfo("top-k", vod.topk_sample, color=colors[2]),
+        SamplerInfo("priority", vod.priority_sample, color=colors[1]),
+        SamplerInfo("sn-priority", vod.priority_sample, color=colors[3]),
+    ]
     fig, axes = plt.subplots(
         figsize=(3 * args.noise_scale_step, 3 * 4),
         ncols=args.noise_scale_step,
         nrows=4,
         sharey="row",
     )
-    colors = sns.color_palette()
 
     sample_range = np.logspace(
         np.log10(args.n_samples_min),
@@ -98,19 +107,19 @@ def run():
         h_values = probs + torch.randn_like(f_values)
         expected_value = (h_values * probs).sum(dim=-1)
 
-        for j, (sampler_name, sampler) in enumerate(samplers.items()):
+        for j, (sampler) in enumerate(samplers):
             data = {"mean": [], "upper": [], "lower": [], "var": [], "bias": []}
             for k, n_samples in enumerate(sample_range):
                 f_values_ = f_values[None, :].expand(args.n_trials, -1)
                 if args.tensor_type == "torch":
-                    samples = sampler(f_values_, n_samples=int(n_samples))
+                    samples = sampler.fn(f_values_, n_samples=int(n_samples))
                 elif args.tensor_type == "numpy":
-                    samples = sampler(f_values_.numpy(), n_samples=int(n_samples))
+                    samples = sampler.fn(f_values_.numpy(), n_samples=int(n_samples))
                     samples = samples.to(torch.Tensor)
                 else:
                     raise ValueError(f"Unknown tensor type: {args.tensor_type}")
 
-                if sampler_name.startswith("sn-"):
+                if sampler.name.startswith("sn-"):
                     w = samples.log_weights.softmax(dim=-1)
                 else:
                     w = samples.log_weights.exp()
@@ -137,15 +146,16 @@ def run():
             axes[1, 0].set_ylabel(r"estimates")
             if j == 0:
                 axes[1, i].fill_between(sample_range, data["lower"], data["upper"], alpha=0.1, color=colors[j])
-            axes[1, i].plot(sample_range, data["lower"], color=colors[j], alpha=0.5, linestyle="--")
-            axes[1, i].plot(sample_range, data["upper"], color=colors[j], alpha=0.5, linestyle="--")
-            axes[1, i].plot(sample_range, data["mean"], label=sampler_name, color=colors[j])
+            axes[1, i].plot(sample_range, data["lower"], color=sampler.color, alpha=0.5, linestyle="--")
+            axes[1, i].plot(sample_range, data["upper"], color=sampler.color, alpha=0.5, linestyle="--")
+            axes[1, i].plot(sample_range, data["mean"], label=sampler.name, color=sampler.color)
             if i == len(scale_range) - 1:
                 axes[1, i].legend()
 
             # variance
             axes[2, 0].set_xscale("log")
             axes[2, 0].set_yscale("log")
+            axes[2, 0].set_ylim(1e-6, 1e1)
             axes[2, 0].set_ylabel("variance")
             if j == 0:
                 axes[2, i].plot(
@@ -156,13 +166,14 @@ def run():
                     linestyle="--",
                     alpha=0.5,
                 )
-            axes[2, i].plot(sample_range, data["var"], label=sampler_name, color=colors[j])
+            axes[2, i].plot(sample_range, data["var"], label=sampler.name, color=sampler.color)
             if i == len(scale_range) - 1:
                 axes[2, i].legend()
 
             # bias
             axes[3, 0].set_xscale("log")
             axes[3, 0].set_yscale("log")
+            axes[3, 0].set_ylim(1e-6, 1e1)
             axes[3, 0].set_ylabel("bias")
             axes[3, i].set_xlabel("number of samples")
             if j == 0:
@@ -174,7 +185,7 @@ def run():
                     linestyle="--",
                     alpha=0.5,
                 )
-            axes[3, i].plot(sample_range, data["bias"], label=sampler_name, color=colors[j])
+            axes[3, i].plot(sample_range, data["bias"], label=sampler.name, color=sampler.color)
             if i == len(scale_range) - 1:
                 axes[3, i].legend()
 

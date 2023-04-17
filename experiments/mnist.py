@@ -111,23 +111,23 @@ class ConditionalDiscreteVae(torch.nn.Module):
         layers.append(torch.nn.Linear(hidden_size, int(math.prod(output_shape))))
         self.decoder = torch.nn.Sequential(*layers)
 
-    def prior(self, y: torch.Tensor) -> torch.distributions.Categorical:
+    def prior(self, y: torch.Tensor) -> torch.Tensor:
         h_y = self.label_embeddings(y)
-        logits = torch.einsum("id,md-> im", h_y, self.memory)
-        return torch.distributions.Categorical(logits=logits)
+        logits = torch.einsum("...d,md-> ...m", h_y, self.memory)
+        return logits.log_softmax(dim=-1)
 
-    def posterior(self, x: torch.Tensor) -> torch.distributions.Categorical:
+    def posterior(self, x: torch.Tensor) -> torch.Tensor:
         x_flatten = x.view(x.shape[0], -1).float()
         h_x = self.encoder(x_flatten)
-        x_logits = torch.einsum("id,md-> im", h_x, self.memory)
-        return torch.distributions.Categorical(logits=x_logits)
+        logits = torch.einsum("...d,md-> ...m", h_x, self.memory)
+        return logits.log_softmax(dim=-1)
 
     def sample(self, y: Optional[torch.Tensor] = None, n_samples: int = 10) -> torch.Tensor:
         if y is None:
             y = torch.range(0, self.num_labels - 1, device=self.memory.device).long()
         prior = self.prior(y)
-        z = prior.sample(torch.Size((n_samples,)))
-        return self._decode(z)
+        z = vod.priority_sample(prior, n_samples=n_samples)
+        return self._decode(z.indices)
 
     def forward(
         self, x: torch.Tensor, y: torch.Tensor, n_samples: int = 100, alpha: float = 0.0
@@ -135,16 +135,17 @@ class ConditionalDiscreteVae(torch.nn.Module):
         batch_size = x.shape[0]
         prior = self.prior(y)
         posterior = self.posterior(x)
-        z = posterior.sample(torch.Size((n_samples,)))
-        log_p_z = prior.log_prob(z)
-        log_q_z = posterior.log_prob(z)
-        x_logits = self._decode(z)
+        z = vod.priority_sample(posterior, n_samples=n_samples)
+        log_p_z = prior.gather(dim=-1, index=z.indices)
+        log_q_z = posterior.gather(dim=-1, index=z.indices)
+        x_logits = self._decode(z.indices)
         p_x__z = torch.distributions.Bernoulli(logits=x_logits)
-        log_p_x__z = p_x__z.log_prob(x.view(batch_size, -1)[None, ...].float()).sum(dim=-1)
+        log_p_x__z = p_x__z.log_prob(x.view(batch_size, -1)[:, None].float()).sum(dim=-1)
         vod_data = vod.vod_objective(
-            log_p_x__z=log_p_x__z.T,
-            log_p_z=log_p_z.T,
-            log_q_z=log_q_z.T,
+            log_p_x__z=log_p_x__z,
+            log_s=z.log_weights,
+            log_p_z=log_p_z,
+            log_q_z=log_q_z,
             alpha=alpha,
         )
 
@@ -152,7 +153,7 @@ class ConditionalDiscreteVae(torch.nn.Module):
             "x_logits": x_logits,
             "log_p_z": log_p_z,
             "log_p_x__z": log_p_x__z,
-            "loss": vod_data.theta_loss,
+            "loss": vod_data.loss,
             "bound": vod_data.log_p,
         }
 
@@ -204,6 +205,12 @@ def run():
                 pltxt.show()
 
 
+def _log_prob(logits: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
+    log_probs = logits.log_softmax(-1)
+    rich.print(dict(log_probs=log_probs.shape, indices=indices.shape))
+    return torch.gather(log_probs, -1, indices).squeeze(-1)
+
+
 def _test_model(model: ConditionalDiscreteVae, test_dl: torch.utils.data.DataLoader) -> Iterable[float]:
     for j, (x, y) in enumerate(test_dl):
         if j > 10:
@@ -214,7 +221,7 @@ def _test_model(model: ConditionalDiscreteVae, test_dl: torch.utils.data.DataLoa
 
 def _plot_prior_samples(model, global_step):
     logits = model.sample(n_samples=10).detach()
-    logits = logits.permute(1, 0, 2).reshape(10, 10, 28, 28).contiguous().numpy()
+    logits = logits.reshape(10, 10, 28, 28).contiguous().numpy()
     grid = torchvision.utils.make_grid(
         torch.from_numpy(logits).view(-1, 1, 28, 28),
         nrow=10,

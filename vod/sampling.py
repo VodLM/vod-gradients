@@ -81,7 +81,7 @@ class RunAsTorch:
             raise TypeError(f"Unknown type for scores: {type(scores)}")
 
 
-def mc_sample(scores: Ts, n_samples: int) -> Samples[Ts]:
+def multinomial_sample(scores: Ts, n_samples: int) -> Samples[Ts]:
     scores_type = type(scores)
     sample_fn = {
         torch.Tensor: _mc_sample_torch,
@@ -157,6 +157,7 @@ def _priority_sample_torch(scores: torch.Tensor, n_samples: int, mode: str = "un
 def _topk_sample_torch(scores: torch.Tensor, n_samples: int) -> Samples[torch.Tensor]:
     """Sample the top-K values."""
     indices = scores.argsort(dim=-1, descending=True)[..., :n_samples]
-    log_weight = torch.zeros_like(indices, dtype=torch.float32) - math.log(indices.shape[-1])
+    log_weight = scores.gather(dim=-1, index=indices)
+    log_weight = log_weight.log_softmax(dim=-1)
 
     return Samples(indices=indices, log_weights=log_weight)
