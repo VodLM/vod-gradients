@@ -1,5 +1,8 @@
+from __future__ import annotations
+
 import argparse
 import dataclasses
+import functools
 
 import numpy as np
 import rich
@@ -62,7 +65,7 @@ def generate_scores(
 @dataclasses.dataclass
 class SamplerInfo:
     name: str
-    fn: vod.SampleFn
+    fn: vod.SampleFn | functools.partial
     color: str
 
 
@@ -75,8 +78,7 @@ def run():
     samplers = [
         SamplerInfo("multinomial", vod.multinomial_sample, color=colors[0]),
         SamplerInfo("top-k", vod.topk_sample, color=colors[2]),
-        SamplerInfo("priority", vod.priority_sample, color=colors[1]),
-        SamplerInfo("sn-priority", vod.priority_sample, color=colors[3]),
+        SamplerInfo("priority", functools.partial(vod.priority_sample, normalize=True), color=colors[1]),
     ]
     fig, axes = plt.subplots(
         figsize=(3 * args.noise_scale_step, 3 * 4),
@@ -119,18 +121,14 @@ def run():
                 else:
                     raise ValueError(f"Unknown tensor type: {args.tensor_type}")
 
-                if sampler.name.startswith("sn-"):
-                    w = samples.log_weights.softmax(dim=-1)
-                else:
-                    w = samples.log_weights.exp()
-
+                w = samples.log_weights.exp()
                 mc_estimates = (w * h_values[samples.indices]).sum(dim=-1)
-                expected_h = (mc_estimates - expected_value).abs()
+                expected_h = mc_estimates.mean()
                 data["mean"].append(mc_estimates.mean().item())
                 data["upper"].append(mc_estimates.quantile(0.95).item())
                 data["lower"].append(mc_estimates.quantile(0.05).item())
                 data["var"].append((mc_estimates - expected_h).var().item())
-                data["bias"].append(expected_h.mean().item())
+                data["bias"].append((expected_h - expected_value).abs().item())
 
             # data
             if j == 0:
@@ -153,8 +151,8 @@ def run():
                 axes[1, i].legend()
 
             # variance
-            axes[2, 0].set_xscale("log")
-            axes[2, 0].set_yscale("log")
+            axes[2, i].set_xscale("log")
+            axes[2, i].set_yscale("log")
             axes[2, 0].set_ylim(1e-6, 1e1)
             axes[2, 0].set_ylabel("variance")
             if j == 0:
@@ -171,8 +169,8 @@ def run():
                 axes[2, i].legend()
 
             # bias
-            axes[3, 0].set_xscale("log")
-            axes[3, 0].set_yscale("log")
+            axes[3, i].set_xscale("log")
+            axes[3, i].set_yscale("log")
             axes[3, 0].set_ylim(1e-6, 1e1)
             axes[3, 0].set_ylabel("bias")
             axes[3, i].set_xlabel("number of samples")

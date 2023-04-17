@@ -90,14 +90,14 @@ def multinomial_sample(scores: Ts, n_samples: int) -> Samples[Ts]:
     return sample_fn(scores, n_samples)
 
 
-def priority_sample(scores: Ts, n_samples: int) -> Samples[Ts]:
+def priority_sample(scores: Ts, n_samples: int, normalize: bool = True) -> Samples[Ts]:
     scores_type = type(scores)
     sample_fn = {
         torch.Tensor: _priority_sample_torch,
         np.ndarray: RunAsTorch(_priority_sample_torch),
     }[scores_type]
 
-    return sample_fn(scores, n_samples)
+    return sample_fn(scores, n_samples, normalize=normalize)
 
 
 def topk_sample(scores: Ts, n_samples: int) -> Samples[Ts]:
@@ -117,7 +117,12 @@ def _mc_sample_torch(scores: torch.Tensor, n_samples: int) -> Samples[torch.Tens
     return Samples(indices, weights)
 
 
-def _priority_sample_torch(scores: torch.Tensor, n_samples: int, mode: str = "uniform") -> Samples[torch.Tensor]:
+def _priority_sample_torch(
+    scores: torch.Tensor,
+    n_samples: int,
+    mode: str = "uniform",
+    normalize: bool = True,
+) -> Samples[torch.Tensor]:
     """Sample a distributions using priority sampling."""
     log_p = scores.log_softmax(dim=-1)
 
@@ -150,6 +155,9 @@ def _priority_sample_torch(scores: torch.Tensor, n_samples: int, mode: str = "un
 
     # finally, compute the log weights
     log_weights = log_pi - log_qz
+
+    if normalize:
+        log_weights = log_weights.log_softmax(dim=-1)
 
     return Samples(indices=indices, log_weights=log_weights)
 
