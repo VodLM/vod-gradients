@@ -23,6 +23,17 @@ class VOD:
         return self.log_p - self.elbo
 
 
+    def dict(self) -> dict[str, torch.Tensor]:
+        return {
+            "log_p": self.log_p,
+            "elbo": self.elbo,
+            "theta_loss": self.theta_loss,
+            "phi_loss": self.phi_loss,
+            "loss": self.loss,
+            "kl": self.kl,
+        }
+
+
 def vod_objective(
     log_p_x__z: torch.Tensor,
     log_p_z: torch.Tensor,
