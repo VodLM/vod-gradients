@@ -3,6 +3,7 @@ data/
 cache/
 .ruff_cache/
 sandbox*
+wandb/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

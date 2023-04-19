@@ -84,8 +84,8 @@ class RunAsTorch:
 def multinomial_sample(scores: Ts, n_samples: int) -> Samples[Ts]:
     scores_type = type(scores)
     sample_fn = {
-        torch.Tensor: _mc_sample_torch,
-        np.ndarray: RunAsTorch(_mc_sample_torch),
+        torch.Tensor: _multinomial_sample_torch,
+        np.ndarray: RunAsTorch(_multinomial_sample_torch),
     }[scores_type]
     return sample_fn(scores, n_samples)
 
@@ -110,7 +110,7 @@ def topk_sample(scores: Ts, n_samples: int) -> Samples[Ts]:
     return sample_fn(scores, n_samples)
 
 
-def _mc_sample_torch(scores: torch.Tensor, n_samples: int) -> Samples[torch.Tensor]:
+def _multinomial_sample_torch(scores: torch.Tensor, n_samples: int) -> Samples[torch.Tensor]:
     probs = torch.softmax(scores, dim=-1)
     indices = torch.multinomial(probs, n_samples, replacement=True)
     weights = torch.zeros_like(indices, dtype=torch.float32) - math.log(indices.shape[-1])

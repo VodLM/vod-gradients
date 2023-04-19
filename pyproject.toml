@@ -26,6 +26,8 @@ torchvision = "^0.15.1"
 plotext = "^5.2.8"
 matplotlib = "^3.7.1"
 seaborn = "^0.12.2"
+wandb = "^0.14.2"
+loguru = "^0.7.0"
 
 
 [build-system]
