@@ -21,7 +21,7 @@ class VodObjective:
         return self.theta_loss
 
     @property
-    def kl(self) -> torch.Tensor:
+    def kl_vi(self) -> torch.Tensor:
         return self.logp - self.elbo
 
     def diagnostics(self) -> dict[str, torch.Tensor]:
@@ -31,7 +31,7 @@ class VodObjective:
             "iw_rvb": self.iw_rvb,
             "theta_loss": self.theta_loss,
             "phi_loss": self.phi_loss,
-            "kl": self.kl,
+            "kl_vi": self.kl_vi,
         }
 
 
