@@ -1,13 +1,14 @@
 import argparse
 import collections
 import math
-from typing import Callable, Optional, Iterable
+from typing import Callable, Optional, Iterable, Union
 
 import numpy as np
 import pydantic
 import rich.progress
 import torch.nn
 import torchvision
+from torch import nn
 
 from torchvision import datasets, transforms
 import vod
@@ -29,12 +30,14 @@ class Args(pydantic.BaseModel):
     num_epochs: int = 20
     batch_size: int = 64
     n_samples: int = 32
-    latent_dim: int = 8
-    latent_size: int = 128
+    latent_dim: int = 1
+    latent_size: int = 1_024
     embedding_dim: int = 32
-    alpha_start: float = 0.0
+    alpha_start: float = 0.99
     alpha: float = 0.0
-    warmup_steps: float = 5_000
+    beta_start: float = 0.0
+    beta: float = 1.0
+    warmup_steps: float = 2_000
     lr: float = 1e-3
     exp_version: str = "v0.1"
     device: str = "cpu"
@@ -118,6 +121,8 @@ class ConditionalDiscreteVae(torch.nn.Module):
             )
         layers.append(torch.nn.Linear(hidden_size, self.latent_dim * self.embedding_dim))
         self.encoder = torch.nn.Sequential(*layers)
+        self.scale_prior = nn.Parameter(1e-5 * torch.ones(1))
+        self.scale_posterior = nn.Parameter(1e-5 * torch.ones(1))
 
         # decoder
         layers = [
@@ -145,6 +150,7 @@ class ConditionalDiscreteVae(torch.nn.Module):
 
     def prior(self, y: torch.Tensor) -> torch.Tensor:
         h_y = self.label_embeddings(y)
+        h_y = self.scale_prior * h_y
         h_y = h_y.view(*h_y.shape[:-1], self.latent_dim, self.embeddings.shape[-1])
         logits = torch.einsum("...nd,nmd-> ...nm", h_y, self.embeddings)
         return logits.log_softmax(dim=-1)
@@ -152,6 +158,7 @@ class ConditionalDiscreteVae(torch.nn.Module):
     def posterior(self, x: torch.Tensor) -> torch.Tensor:
         x_flatten = x.view(x.shape[0], -1).float()
         h_x = self.encoder(x_flatten)
+        h_x = self.scale_posterior * h_x
         h_x = h_x.view(*h_x.shape[:-1], self.latent_dim, self.embedding_dim)
         logits = torch.einsum("...nd,nmd-> ...nm", h_x, self.embeddings)
         return logits.log_softmax(dim=-1)
@@ -174,32 +181,33 @@ class ConditionalDiscreteVae(torch.nn.Module):
         y: torch.Tensor,
         n_samples: int = 100,
         alpha: float = 0.0,
+        beta: float = 1.0,
         sample_fn: vod.SampleFn = vod.priority_sample,
-    ) -> dict[str, torch.Tensor]:
+    ) -> dict[str, Union[torch.Tensor, vod.VodObjective]]:
         batch_size = x.shape[0]
         prior = self.prior(y)
         posterior = self.posterior(x)
-        z = sample_fn(posterior, n_samples=n_samples)
+        sampling_dist = (beta * posterior).detach()
+        z = sample_fn(sampling_dist, n_samples=n_samples)
         log_p_z = prior.gather(dim=-1, index=z.indices)
         log_q_z = posterior.gather(dim=-1, index=z.indices)
+        log_sampl_z = sampling_dist.gather(dim=-1, index=z.indices)
         x_logits = self._decode(z.indices)
         p_x__z = torch.distributions.Bernoulli(logits=x_logits)
         log_p_x__z = p_x__z.log_prob(x.view(batch_size, -1)[:, None].float()).sum(dim=-1)
         vod_data = vod.vod_objective(
             log_p_x__z=log_p_x__z,
-            log_s=z.log_weights.sum(dim=1),
-            log_p_z=log_p_z.sum(dim=1),
-            log_q_z=log_q_z.sum(dim=1),
+            log_s_psi=z.log_weights.sum(dim=1),
+            f_theta=log_p_z.sum(dim=1),
+            f_phi=log_q_z.sum(dim=1),
+            f_psi=log_sampl_z.sum(dim=1),
             alpha=alpha,
         )
 
         return {
             "x_logits": x_logits,
-            "log_p_z": log_p_z,
-            "log_p_x__z": log_p_x__z,
             "loss": vod_data.loss,
-            "logp": vod_data.log_p,
-            "kl": vod_data.kl,
+            "vod": vod_data,
         }
 
     def _decode(self, z: torch.Tensor) -> torch.Tensor:
@@ -237,7 +245,6 @@ def run():
     train_metrics = collections.defaultdict(list)
     test_metrics = collections.defaultdict(list)
     global_step = 0
-    track_keys = ["loss", "logp", "kl"]
     for e in range(args.num_epochs):
         for i, (x, y) in enumerate(rich.progress.track(train_dl, description="training")):
             alpha = linear_warmup(
@@ -246,16 +253,22 @@ def run():
                 start=args.alpha_start,
                 end=args.alpha,
             )
+            beta = linear_warmup(
+                global_step,
+                period=args.warmup_steps,
+                start=args.beta_start,
+                end=args.beta,
+            )
             x = x.to(args.device)
             y = y.to(args.device)
             model.zero_grad()
-            output = model(x, y, alpha=alpha, n_samples=args.n_samples, sample_fn=sample_fn)
+            output = model(x, y, alpha=alpha, beta=beta, n_samples=args.n_samples, sample_fn=sample_fn)
             loss = output["loss"].mean()
             loss.backward()
             optimizer.step()
             global_step += 1
-            for key in track_keys:
-                train_metrics[key] += [output[key].detach().mean().item()]
+            for k, v in output["vod"].diagnostics().items():
+                train_metrics[k] += [v.detach().mean().item()]
             train_metrics["step"] += [global_step]
             if i % 100 == 0:
                 grads = _compute_grads(model=model, x=x, y=y)
@@ -269,15 +282,17 @@ def run():
                 with torch.inference_mode():
                     # plot the samples for the first element in the batch
                     _plot_prior_samples(model, global_step)
-                    for key, value in _test_model(model, test_dl, track_keys=track_keys).items():
+                    for key, value in _test_model(model, test_dl).items():
                         test_metrics[key] += [value]
                     test_metrics["step"] += [global_step]
                 loguru.logger.info(
-                    f"epoch={e} step={i} train.logp={train_metrics['logp'][-1]:.2f} test.logp={test_metrics['logp'][-1]:.2f}"
+                    f"epoch={e} step={i} train.logp={train_metrics['logp'][-1]:.2f} test.logp={test_metrics['logp'][-1]:.2f}, "
+                    f"grad.phi.std={grad_stats['grad/phi/std']:.2f}"
                 )
                 wandb.log(
                     {
                         "parameters/alpha": alpha,
+                        "parameters/beta": beta,
                         **{f"train/{k}": v[-1] for k, v in train_metrics.items()},
                         **{f"test/{k}": v[-1] for k, v in test_metrics.items()},
                     },
@@ -287,14 +302,12 @@ def run():
 
 def _log_prob(logits: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
     log_probs = logits.log_softmax(-1)
-    rich.print(dict(log_probs=log_probs.shape, indices=indices.shape))
     return torch.gather(log_probs, -1, indices).squeeze(-1)
 
 
 def _test_model(
     model: ConditionalDiscreteVae,
     test_dl: torch.utils.data.DataLoader,
-    track_keys: list[str],
 ) -> Iterable[float]:
     metrics = collections.defaultdict(list)
     for j, (x, y) in enumerate(test_dl):
@@ -303,8 +316,8 @@ def _test_model(
         if j > 10:
             break
         output = model(x, y)
-        for key in track_keys:
-            metrics[key] += [output[key].detach().mean().item()]
+        for k, v in output["vod"].diagnostics().items():
+            metrics[k] += [v.detach().mean().item()]
     return {k: np.mean(v) for k, v in metrics.items()}
 
 
@@ -326,23 +339,31 @@ def _compute_grads(
         loss.backward()
         for name, params in {"theta": model.theta, "phi": model.phi}.items():
             ngrads = (p.grad for p in params if p.grad is not None)
-            ngrads = [g.view(1, -1) for g in ngrads]
-            ngrads = torch.cat(ngrads, dim=1)
+            ngrads = [g.view(-1, 1) for g in ngrads]
+            ngrads = torch.cat(ngrads, dim=0)
             if name not in grads:
                 grads[name] = ngrads
             else:
-                grads[name] = torch.cat([grads[name], ngrads])
+                grads[name] = torch.cat([grads[name], ngrads], dim=1)
 
     return grads
 
 
 def _grads_stats(grads: torch.Tensor) -> dict[str, float]:
-    grads = grads[grads.any(dim=1)]
-    if grads.numel() == 0:
-        return {}
+    grad_std = grads.std(dim=1)
+    is_defined = ~grad_std.isnan()
+
+    if is_defined.sum() == 0:
+        _mean = math.nan
+        _std = math.nan
+    else:
+        grads = grads[is_defined]
+        _mean = grads.mean(dim=1).abs().mean().item()
+        _std = grads.std(dim=1).mean().item()
     return {
-        "mean": grads.mean(dim=1).abs().mean().item(),
-        "std": grads.std(dim=1).abs().mean().item(),
+        "mean": _mean,
+        "std": _std,
+        "nnz": is_defined.sum(dim=0).float().item(),
     }
 
 
