@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import dataclasses
 import math
+from typing import Any, Callable, Generic, Protocol, TypeVar, Union
 
 import numpy as np
 import torch
-from typing import Generic, TypeVar, Union, Any, Callable, Protocol
-
 from typing_extensions import Type
 
 Ts = TypeVar("Ts", bound=Union[torch.Tensor, np.ndarray])
@@ -32,7 +31,7 @@ class Samples(Generic[Ts]):
     def shape(self) -> tuple[int, ...]:
         return tuple(self.indices.shape)
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return (
             f"Samples[{type(self.indices).__name__}]"
             f"(indices={self.indices.shape}, log_weights={self.log_weights.shape})"
@@ -69,7 +68,7 @@ class SampleFn(Protocol[Ts]):
 
 
 class RunAsTorch:
-    def __init__(self, fn: Callable[[Ts, ...], Samples[Ts]]):
+    def __init__(self, fn: Callable[[Ts, ...], Samples[Ts]]) -> None:
         self.fn = fn
 
     def __call__(self, scores: Ts, n_samples: int) -> Samples[Ts]:
@@ -112,7 +111,17 @@ def topk_sample(scores: Ts, n_samples: int) -> Samples[Ts]:
 
 def _multinomial_sample_torch(scores: torch.Tensor, n_samples: int) -> Samples[torch.Tensor]:
     probs = torch.softmax(scores, dim=-1)
-    indices = torch.multinomial(probs, n_samples, replacement=True)
+    shape = probs.shape
+    probs=probs.view(-1, shape[-1])
+    if torch.any(torch.isnan(probs)):
+        raise RuntimeError(f"NaNs in probs ({torch.isnan(probs).sum()})")
+    try:
+        indices = torch.multinomial(probs, n_samples, replacement=True)
+    except RuntimeError as exc:
+        import rich
+        rich.print(probs)
+        raise exc
+    indices = indices.view(*shape[:-1], n_samples)
     weights = torch.zeros_like(indices, dtype=torch.float32) - math.log(indices.shape[-1])
     return Samples(indices, weights)
 

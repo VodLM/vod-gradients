@@ -4,12 +4,12 @@ import argparse
 import dataclasses
 import functools
 
-import numpy as np
-import rich
-import torch
-import pydantic
 import matplotlib.pyplot as plt
+import numpy as np
+import pydantic
+import rich
 import seaborn as sns
+import torch
 
 import vod
 
@@ -35,7 +35,7 @@ class Args(pydantic.BaseModel):
 
     @classmethod
     def parse(cls) -> "Args":
-        """Parse arguments using `argparse`"""
+        """Parse arguments using `argparse`."""
         parser = argparse.ArgumentParser()
         for field in cls.__fields__.values():
             parser.add_argument(f"--{field.name}", type=field.type_, default=field.default)
@@ -111,7 +111,7 @@ def run():
 
         for j, (sampler) in enumerate(samplers):
             data = {"mean": [], "upper": [], "lower": [], "var": [], "bias": []}
-            for k, n_samples in enumerate(sample_range):
+            for _k, n_samples in enumerate(sample_range):
                 f_values_ = f_values[None, :].expand(args.n_trials, -1)
                 if args.tensor_type == "torch":
                     samples = sampler.fn(f_values_, n_samples=int(n_samples))

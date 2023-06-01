@@ -1,27 +1,23 @@
+from __future__ import annotations
+
 import argparse
 import collections
 import math
-from typing import Callable, Optional, Iterable, Union
+from typing import Callable, Iterable, Optional, Union
 
+import loguru
 import numpy as np
 import pydantic
 import rich.progress
 import torch.nn
 import torchvision
 from torch import nn
-
 from torchvision import datasets, transforms
-import vod
 
-import loguru
+import vod
 import wandb
 
-
-def linear_warmup(step: float, period: float, start: float, end: float) -> float:
-    """Linearly warm up from `start` to `end` over `period` steps"""
-    t = max(0.0, min(step / period, 1.0))
-    return start + t * (end - start)
-
+from .utils import schedule
 
 class Args(pydantic.BaseModel):
     class Config:
@@ -32,20 +28,22 @@ class Args(pydantic.BaseModel):
     n_samples: int = 32
     latent_dim: int = 1
     latent_size: int = 1_024
-    embedding_dim: int = 32
-    alpha_start: float = 0.99
+    embedding_dim: int = 256
+    alpha_start: float = 0.9
     alpha: float = 0.0
-    beta_start: float = 0.0
+    beta_start: float = 1.0
     beta: float = 1.0
-    warmup_steps: float = 2_000
+    warmup_steps: float = 5_000
     lr: float = 1e-3
     exp_version: str = "v0.1"
     device: str = "cpu"
-    sampler: str = "priority"
+    sampler: str = "multinomial"
+    objective: str = "ovis"
+    grads_n_samples: int = 20
 
     @classmethod
     def parse(cls) -> "Args":
-        """Parse arguments using `argparse`"""
+        """Parse arguments using `argparse`."""
         parser = argparse.ArgumentParser()
         for field in cls.__fields__.values():
             parser.add_argument(f"--{field.name}", type=field.type_, default=field.default)
@@ -60,7 +58,7 @@ class ToBinary:
 
 
 class Dataset:
-    def __init__(self, root="data", **kwargs):
+    def __init__(self, root="data", **kwargs) -> None:
         self.train = datasets.MNIST(
             root=root,
             train=True,
@@ -79,7 +77,7 @@ class Dataset:
     def _transform(self) -> Callable:
         return transforms.Compose([transforms.ToTensor(), ToBinary()])
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"Dataset(train={len(self.train)}, test={len(self.test)})"
 
 
@@ -93,7 +91,7 @@ class ConditionalDiscreteVae(torch.nn.Module):
         embedding_dim: int = 32,
         output_shape: tuple[int, ...] = (1, 28, 28),
         num_labels: int = 10,
-    ):
+    ) -> None:
         super().__init__()
 
         # memory
@@ -183,11 +181,12 @@ class ConditionalDiscreteVae(torch.nn.Module):
         alpha: float = 0.0,
         beta: float = 1.0,
         sample_fn: vod.SampleFn = vod.priority_sample,
+        objective_fn: vod.ObjectiveFn = vod.vod_ovis,
     ) -> dict[str, Union[torch.Tensor, vod.VodObjective]]:
         batch_size = x.shape[0]
         prior = self.prior(y)
         posterior = self.posterior(x)
-        sampling_dist = (beta * posterior).detach()
+        sampling_dist = (beta * posterior)
         z = sample_fn(sampling_dist, n_samples=n_samples)
         log_p_z = prior.gather(dim=-1, index=z.indices)
         log_q_z = posterior.gather(dim=-1, index=z.indices)
@@ -195,7 +194,7 @@ class ConditionalDiscreteVae(torch.nn.Module):
         x_logits = self._decode(z.indices)
         p_x__z = torch.distributions.Bernoulli(logits=x_logits)
         log_p_x__z = p_x__z.log_prob(x.view(batch_size, -1)[:, None].float()).sum(dim=-1)
-        vod_data = vod.vod_objective(
+        vod_data = objective_fn(
             log_p_x__z=log_p_x__z,
             log_s_psi=z.log_weights.sum(dim=1),
             f_theta=log_p_z.sum(dim=1),
@@ -233,6 +232,12 @@ def run():
         "multinomial": vod.multinomial_sample,
         "topk": vod.topk_sample,
     }[args.sampler]
+    objective_fn = {
+        "vod": vod.vod_ovis,
+        "ovis": vod.ovis,
+    }[args.objective]
+
+
     model = ConditionalDiscreteVae(
         latent_dim=args.latent_dim,
         latent_size=args.latent_size,
@@ -247,13 +252,13 @@ def run():
     global_step = 0
     for e in range(args.num_epochs):
         for i, (x, y) in enumerate(rich.progress.track(train_dl, description="training")):
-            alpha = linear_warmup(
+            alpha = schedule.cosine_warmup(
                 global_step,
                 period=args.warmup_steps,
                 start=args.alpha_start,
                 end=args.alpha,
             )
-            beta = linear_warmup(
+            beta = schedule.cosine_warmup(
                 global_step,
                 period=args.warmup_steps,
                 start=args.beta_start,
@@ -262,7 +267,7 @@ def run():
             x = x.to(args.device)
             y = y.to(args.device)
             model.zero_grad()
-            output = model(x, y, alpha=alpha, beta=beta, n_samples=args.n_samples, sample_fn=sample_fn)
+            output = model(x, y, alpha=alpha, beta=beta, n_samples=args.n_samples, sample_fn=sample_fn, objective_fn=objective_fn)
             loss = output["loss"].mean()
             loss.backward()
             optimizer.step()
@@ -271,7 +276,9 @@ def run():
                 train_metrics[k] += [v.detach().mean().item()]
             train_metrics["step"] += [global_step]
             if i % 100 == 0:
-                grads = _compute_grads(model=model, x=x, y=y)
+                x_grads = x[:1].repeat(args.grads_n_samples, 1, 1, 1)
+                y_grads = y[:1].repeat(args.grads_n_samples)
+                grads = _compute_grads(model=model, x=x_grads, y=y_grads)
                 grad_stats = {}
                 for k, v in grads.items():
                     k_stats = _grads_stats(v)

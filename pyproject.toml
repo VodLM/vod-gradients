@@ -28,6 +28,7 @@ matplotlib = "^3.7.1"
 seaborn = "^0.12.2"
 wandb = "^0.14.2"
 loguru = "^0.7.0"
+notebook = "^6.5.4"
 
 
 [build-system]
@@ -39,8 +40,41 @@ line-length = 120
 
 [tool.ruff]
 # Enable pycodestyle (`E`) and Pyflakes (`F`) codes by default.
-select = ["E", "F"]
-ignore = []
+select = [
+  "E",   # pycodestyle
+  "F",   # pyflakes
+  "D",   # pydocstyle
+  "ANN", # flake8-annotations
+  "PL",  # pylint
+  "I",   # isort
+  "B",   # flake8-bugbear
+  "N",   # pep8-naming
+  "C",   # mccabe
+  "S",   # flake8-bandit
+  "G",   # flake8-logging-format
+  "DTZ", # flake8-datetimez
+  "ICN", # flake8-import-conventions
+  "RET", # flake8-return
+  "SIM", # flake8-simplify
+  "TID", # flake8-tidy-imports
+  "PTH", # flake8-use-pathlib
+  "ARG", # flake8-unused-arguments
+]
+ignore = [
+  "D100",    # undocumented-public-module
+  "D104",    # undocumented-public-package
+  "D105",    # undocumented-magic-method
+  "D107",    # undocumented-public-init
+  "ANN101",  # missing-type-self
+  "ANN204",  # missing-return-type-special-method
+  "B905",    # zip-without-explicit-strict
+  "PLC1901", # compare-to-empty-string
+  "PTH123",  # builtin-open
+  "RET504",  # unnecessary-assign
+  "N805", # invalid-first-argument-name-for-method
+  "N812", # lowercase-underscore
+]
+
 
 # Allow autofix for all enabled rules (when `--fix`) is provided.
 fixable = ["A", "B", "C", "D", "E", "F", "G", "I", "N", "Q", "S", "T", "W", "ANN", "ARG", "BLE", "COM", "DJ", "DTZ", "EM", "ERA", "EXE", "FBT", "ICN", "INP", "ISC", "NPY", "PD", "PGH", "PIE", "PL", "PT", "PTH", "PYI", "RET", "RSE", "RUF", "SIM", "SLF", "TCH", "TID", "TRY", "UP", "YTT"]
